@@ -21,15 +21,17 @@ const MAX_RESULTS_COMMENT: usize = 100;
 */
 
 // 최대 비디오 수
-const MAX_RESULTS_VIDEO: usize = 5;
+const MAX_RESULTS_VIDEO: usize = 10;
 // 최대 댓글 수
-const MAX_RESULTS_COMMENT: usize = 5;
+const MAX_RESULTS_COMMENT: usize = 100;
 
 #[tokio::main]
 async fn main() {
     dotenv().ok();
     let input_text = get_input_text();
     let videos = get_videos(input_text).await.unwrap();
+    println!("{:#?}", videos);
+
     let scripts = get_scripts(&videos).await.unwrap();
     let comments = get_comments(&videos).await.unwrap();
 
@@ -54,18 +56,22 @@ async fn main() {
             })
             .collect();
         println!(
-            "title: {:#?} / script: {:#?} / comments: {:#?}",
+            "제목: {:#?}\n스크립트: {:#?}\n댓글: {:#?}",
             title, script, comments
         );
 
-        let translate_script = get_translate_text(script.clone()).await;
-        let translate_comments: Vec<String> =
-            join_all(comments.iter().map(|x| get_translate_text(x.clone())))
-                .await
-                .into_iter()
-                .collect();
+        let translate_script =
+            get_translate_text(script.clone(), "KO".to_owned(), "EN".to_owned()).await;
+        let translate_comments: Vec<String> = join_all(
+            comments
+                .iter()
+                .map(|x| get_translate_text(x.clone(), "KO".to_owned(), "EN".to_owned())),
+        )
+        .await
+        .into_iter()
+        .collect();
         println!(
-            "translate_script: {:#?} / translate_comments: {:#?}",
+            "영문 스크립트: {:#?}\n영문 댓글: {:#?}",
             translate_script, translate_comments
         );
 
@@ -73,20 +79,33 @@ async fn main() {
         // DistilBERT 모델을 활용하여 유튜브 스크립트의 주제와 결론에 대해 질문한다.
         let (_, question_answering_classifier) = QuestionAnsweringClassifier::spawn();
         let question = "What is the theme and conclusion of the video?".to_owned();
-        let answers = question_answering_classifier
+        let translate_answers = question_answering_classifier
             .predict(question, translate_script.clone())
             .await
             .unwrap();
-        println!("answers: {answers:?}");
+        let answers = join_all(translate_answers.iter().flat_map(|x| {
+            x.iter()
+                .map(|y| get_translate_text(y.answer.clone(), "EN".to_owned(), "KO".to_owned()))
+        }))
+        .await;
+        println!("영문 주제와 결론: {translate_answers:#?}");
+        println!("주제와 결론: {answers:#?}");
 
         // 2. 요약
         // BART 모델을 활용하여 유튜브 스크립트 요약을 진행한다.
         let (_, summarization_classifier) = SummarizationClassifier::spawn();
-        let summarize = summarization_classifier
+        let translate_summarize = summarization_classifier
             .summarize(vec![translate_script.clone()])
             .await
             .unwrap();
-        println!("summarize: {summarize:?}");
+        let summarize = join_all(
+            translate_summarize
+                .iter()
+                .map(|x| get_translate_text(x.clone(), "EN".to_owned(), "KO".to_owned())),
+        )
+        .await;
+        println!("영문 스크립트 요약: {translate_summarize:#?}");
+        println!("스크립트 요약: {summarize:#?}");
 
         // 3. 감정 분석
         // DistilBERT 모델을 활용하여 유튜브 댓글에 대한 이진 감정을 분석한다.
@@ -95,21 +114,34 @@ async fn main() {
             .predict(translate_comments.clone())
             .await
             .unwrap();
-        println!("sentiments: {sentiments:?}");
+        println!("댓글 감성 분석: {sentiments:#?}");
 
         // 4. 키워드 추출
         // 유튜브 스크립트와 댓글에서 키워드를 추출한다.
         let (_, keyword_extraction_classifier) = KeywordExtractionClassifier::spawn();
-        let script_keywords = keyword_extraction_classifier
+        let translate_script_keywords = keyword_extraction_classifier
             .predict(vec![translate_script.clone()])
             .await
             .unwrap();
-        println!("script_keywords: {script_keywords:?}");
-        let comments_keywords = keyword_extraction_classifier
+        let script_keywords = join_all(translate_script_keywords.iter().flat_map(|x| {
+            x.iter()
+                .map(|y| get_translate_text(y.text.clone(), "EN".to_owned(), "KO".to_owned()))
+        }))
+        .await;
+        println!("영문 스크립트 키워드: {translate_script_keywords:#?}");
+        println!("스크립트 키워드: {script_keywords:#?}");
+
+        let translate_comments_keywords = keyword_extraction_classifier
             .predict(translate_comments.clone())
             .await
             .unwrap();
-        println!("comments_keywords: {comments_keywords:?}");
+        let comments_keywords = join_all(translate_comments_keywords.iter().flat_map(|x| {
+            x.iter()
+                .map(|y| get_translate_text(y.text.clone(), "EN".to_owned(), "KO".to_owned()))
+        }))
+        .await;
+        println!("영문 댓글 키워드: {translate_comments_keywords:#?}");
+        println!("댓글 키워드: {comments_keywords:#?}");
     }
 }
 
@@ -256,14 +288,14 @@ async fn get_comments(videos: &Vec<Value>) -> Option<Vec<Vec<Value>>> {
     Some(comments)
 }
 
-async fn get_translate_text(text: String) -> String {
+async fn get_translate_text(text: String, source: String, target: String) -> String {
     let deepl_api_key = std::env::var("DEEPL_API_KEY").unwrap();
     let client = reqwest::Client::new();
 
     let body: HashMap<&str, Value> = [
         ("text", [text].into()),
-        ("source_lang", "KO".into()),
-        ("target_lang", "EN".into()),
+        ("source_lang", source.into()),
+        ("target_lang", target.into()),
     ]
     .into();
 
